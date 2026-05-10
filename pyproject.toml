@@ -1,0 +1,19 @@
+[project]
+name = "week9-mcp-sqlite-ollama"
+version = "0.1.0"
+description = "Week 9 hands-on: local MCP server backed by SQLite and queried through an Ollama-powered agent."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "httpx>=0.27.0",
+    "mcp>=1.0.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0.0",
+]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
