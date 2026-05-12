@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import ast
 import json
 import os
 import re
@@ -29,9 +30,24 @@ Rules:
 - Prefer get_customer_by_id when the user asks for one customer by ID.
 - Use list_tables for table inventory questions.
 - Use describe_table when the user asks about columns or schema for one table.
-- Use query_readonly only for SELECT analysis.
+- Use query_readonly for analytical questions involving counts, groups, dates, latest/earliest values, ordering, customer names, or channel history.
+- Generate SQLite SQL only.
+- Use COUNT(*) for counts, GROUP BY for grouping, ORDER BY for sorting, MIN/MAX for earliest/latest dates, and LIMIT when asking for one latest or first record.
+- Use LOWER(column) for case-insensitive filters and LIKE for partial customer names.
+- Use customer_channel_events for chronological customer journey or channel history questions.
+- Use customers.current_channel only for the latest known channel snapshot.
 - Never generate write SQL. No INSERT, UPDATE, DELETE, DROP, ALTER, CREATE, PRAGMA, ATTACH, or VACUUM.
 - If the question cannot be answered from the local database, choose "none".
+
+Examples:
+- How many customers are in WhatsApp?
+  {"tool": "query_readonly", "arguments": {"sql": "SELECT COUNT(*) AS customer_count FROM customers WHERE LOWER(current_channel) = 'whatsapp'"}, "reason": "Count customers by current channel."}
+- How many customers are in each current channel?
+  {"tool": "query_readonly", "arguments": {"sql": "SELECT current_channel, COUNT(*) AS customer_count FROM customers GROUP BY current_channel ORDER BY customer_count DESC"}, "reason": "Group customers by current channel."}
+- Which channels did Carol use, oldest first?
+  {"tool": "query_readonly", "arguments": {"sql": "SELECT e.channel, e.event_timestamp FROM customer_channel_events e JOIN customers c ON c.customer_id = e.customer_id WHERE LOWER(c.full_name) LIKE '%carol%' ORDER BY e.event_timestamp ASC"}, "reason": "Read Carol's chronological channel journey."}
+- What was Carol's last channel?
+  {"tool": "query_readonly", "arguments": {"sql": "SELECT e.channel, e.event_timestamp FROM customer_channel_events e JOIN customers c ON c.customer_id = e.customer_id WHERE LOWER(c.full_name) LIKE '%carol%' ORDER BY e.event_timestamp DESC LIMIT 1"}, "reason": "Find Carol's latest interaction."}
 """
 
 
@@ -55,28 +71,122 @@ def _normalize_decision(decision: dict[str, Any]) -> dict[str, Any]:
     return decision
 
 
+def _known_customer_filter(question: str) -> str | None:
+    lowered = question.lower()
+    try:
+        rows = db.query_readonly("SELECT full_name FROM customers")
+    except Exception:
+        return None
+
+    for row in rows:
+        full_name = str(row["full_name"])
+        name_parts = full_name.lower().split()
+        if re.search(rf"\b{re.escape(full_name.lower())}\b", lowered):
+            return full_name
+        if name_parts and re.search(rf"\b{re.escape(name_parts[0])}\b", lowered):
+            return name_parts[0]
+    return None
+
+
+def _extract_channel(question: str) -> str | None:
+    lowered = question.lower()
+    channel_aliases = {
+        "whatsapp": "whatsapp",
+        "zap": "whatsapp",
+        "voice": "voice",
+        "voz": "voice",
+        "chat": "chat",
+        "email": "email",
+        "e-mail": "email",
+    }
+    for alias, channel in channel_aliases.items():
+        if alias in lowered:
+            return channel
+    return None
+
+
 def _route_simple_question(question: str) -> dict[str, Any] | None:
     lowered = question.lower()
     customer_match = re.search(r"\bcustomer\s+(\d+)\b", lowered)
+    known_customer = _known_customer_filter(question)
+    channel = _extract_channel(question)
 
     if "table" in lowered and any(word in lowered for word in ["what", "list", "exist", "available"]):
         return {"tool": "list_tables", "arguments": {}, "reason": "Deterministic table listing route."}
 
-    if customer_match and any(word in lowered for word in ["spent", "spend", "total", "amount", "value"]):
-        customer_id = int(customer_match.group(1))
+    if any(word in lowered for word in ["how many", "quantos", "quantas"]) and channel:
         return {
             "tool": "query_readonly",
             "arguments": {
                 "sql": (
-                    "SELECT c.customer_id, c.full_name, "
-                    "COALESCE(SUM(o.amount_usd), 0) AS lifetime_value_usd "
-                    "FROM customers c "
-                    "LEFT JOIN orders o ON o.customer_id = c.customer_id "
-                    f"WHERE c.customer_id = {customer_id} "
-                    "GROUP BY c.customer_id"
+                    "SELECT current_channel, COUNT(*) AS customer_count "
+                    "FROM customers "
+                    f"WHERE LOWER(current_channel) = '{channel}' "
+                    "GROUP BY current_channel"
                 )
             },
-            "reason": "Deterministic customer spending route.",
+            "reason": "Deterministic count by current channel route.",
+        }
+
+    if any(phrase in lowered for phrase in ["each current channel", "cada canal", "por canal", "by channel"]):
+        return {
+            "tool": "query_readonly",
+            "arguments": {
+                "sql": (
+                    "SELECT current_channel, COUNT(*) AS customer_count "
+                    "FROM customers "
+                    "GROUP BY current_channel "
+                    "ORDER BY current_channel ASC"
+                )
+            },
+            "reason": "Deterministic grouping by current channel route.",
+        }
+
+    if known_customer and any(phrase in lowered for phrase in ["last channel", "ultimo canal", "último canal", "ultima canal", "última canal"]):
+        return {
+            "tool": "query_readonly",
+            "arguments": {
+                "sql": (
+                    "SELECT c.full_name, e.channel, e.event_timestamp, e.event_type "
+                    "FROM customer_channel_events e "
+                    "JOIN customers c ON c.customer_id = e.customer_id "
+                    f"WHERE LOWER(c.full_name) LIKE '%{known_customer.lower()}%' "
+                    "ORDER BY e.event_timestamp DESC "
+                    "LIMIT 1"
+                )
+            },
+            "reason": "Deterministic latest channel route.",
+        }
+
+    if known_customer and any(word in lowered for word in ["channels", "canais", "passou", "history", "journey"]):
+        order = "DESC" if any(word in lowered for word in ["desc", "decrescente", "newest", "recent"]) else "ASC"
+        return {
+            "tool": "query_readonly",
+            "arguments": {
+                "sql": (
+                    "SELECT c.full_name, e.channel, e.event_timestamp, e.event_type "
+                    "FROM customer_channel_events e "
+                    "JOIN customers c ON c.customer_id = e.customer_id "
+                    f"WHERE LOWER(c.full_name) LIKE '%{known_customer.lower()}%' "
+                    f"ORDER BY e.event_timestamp {order}"
+                )
+            },
+            "reason": "Deterministic customer channel history route.",
+        }
+
+    if any(phrase in lowered for phrase in ["earliest interaction", "first interaction", "primeira interação", "primeiro contato"]):
+        return {
+            "tool": "query_readonly",
+            "arguments": {
+                "sql": (
+                    "SELECT c.full_name, e.channel, e.event_timestamp, e.event_type "
+                    "FROM customer_channel_events e "
+                    "JOIN customers c ON c.customer_id = e.customer_id "
+                    "ORDER BY e.event_timestamp ASC "
+                    "LIMIT 1"
+                )
+            },
+            "reason": "Deterministic earliest interaction route.",
         }
 
     if customer_match:
@@ -119,6 +229,35 @@ def _content_to_text(result: Any) -> str:
     return "\n".join(parts)
 
 
+def _format_query_result(tool_text: str) -> str:
+    stripped = tool_text.strip()
+    if stripped.startswith("{") and "\n}\n{" in stripped:
+        stripped = "[" + re.sub(r"}\s*{", "},{", stripped) + "]"
+    try:
+        rows = json.loads(stripped)
+    except json.JSONDecodeError:
+        try:
+            rows = ast.literal_eval(stripped)
+        except (SyntaxError, ValueError):
+            return stripped
+
+    if not rows:
+        return "No rows found."
+    if isinstance(rows, dict):
+        rows = [rows]
+    if not isinstance(rows, list):
+        return str(rows)
+
+    formatted_rows: list[str] = []
+    for index, row in enumerate(rows, start=1):
+        if isinstance(row, dict):
+            values = ", ".join(f"{key}: {value}" for key, value in row.items())
+            formatted_rows.append(f"{index}. {values}")
+        else:
+            formatted_rows.append(f"{index}. {row}")
+    return "\n".join(formatted_rows)
+
+
 async def choose_tool(question: str) -> dict[str, Any]:
     deterministic_decision = _route_simple_question(question)
     if deterministic_decision is not None:
@@ -135,6 +274,9 @@ async def answer_from_tool(question: str, tool_name: str, tool_result: str) -> s
 The MCP tool result is authoritative.
 Be concise.
 If the result contains customer fields or numeric values, use them directly.
+If the tool result contains multiple rows, preserve the exact row order.
+Do not sort, regroup, or reinterpret rows after the SQL result is returned.
+When dates or timestamps are present, print them exactly as provided.
 Only say the local database does not contain enough information when the tool result is empty or explicitly says no data was found.
 
 User question:
@@ -172,6 +314,8 @@ async def run_agent(question: str) -> str:
 
             result = await session.call_tool(tool_name, arguments=decision.get("arguments", {}))
             tool_text = _content_to_text(result)
+            if tool_name == "query_readonly":
+                return _format_query_result(tool_text)
             final_answer = await answer_from_tool(question, tool_name, tool_text)
             return final_answer
 

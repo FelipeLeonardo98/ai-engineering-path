@@ -113,6 +113,18 @@ python -m mcp_sqlite_ollama.agent "How much has customer 123 spent?"
 
 The agent asks Ollama to choose a tool call as JSON, calls the MCP server, then asks Ollama to write the final answer from the tool result.
 
+Try these analytical questions:
+
+```powershell
+python -m mcp_sqlite_ollama.agent "Quantos clientes estão no canal WhatsApp?"
+python -m mcp_sqlite_ollama.agent "Quantos clientes estão no canal voz?"
+python -m mcp_sqlite_ollama.agent "How many customers are in each current channel?"
+python -m mcp_sqlite_ollama.agent "Por onde a cliente Carol passou em ordem crescente?"
+python -m mcp_sqlite_ollama.agent "Qual o último canal que a cliente Carol passou?"
+python -m mcp_sqlite_ollama.agent "Which channels did Bruno use, newest first?"
+python -m mcp_sqlite_ollama.agent "Which customer had the earliest interaction?"
+```
+
 ## Safety Checks
 
 ```powershell

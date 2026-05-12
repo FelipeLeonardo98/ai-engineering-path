@@ -28,6 +28,7 @@ def initialize_database(db_path: Path = DB_PATH) -> None:
         conn.executescript(
             """
             DROP TABLE IF EXISTS orders;
+            DROP TABLE IF EXISTS customer_channel_events;
             DROP TABLE IF EXISTS customers;
 
             CREATE TABLE customers (
@@ -47,6 +48,16 @@ def initialize_database(db_path: Path = DB_PATH) -> None:
                 status TEXT NOT NULL,
                 FOREIGN KEY (customer_id) REFERENCES customers(customer_id)
             );
+
+            CREATE TABLE customer_channel_events (
+                event_id INTEGER PRIMARY KEY,
+                customer_id INTEGER NOT NULL,
+                channel TEXT NOT NULL,
+                event_timestamp TEXT NOT NULL,
+                event_type TEXT NOT NULL,
+                notes TEXT NOT NULL,
+                FOREIGN KEY (customer_id) REFERENCES customers(customer_id)
+            );
             """
         )
 
@@ -58,8 +69,10 @@ def initialize_database(db_path: Path = DB_PATH) -> None:
             """,
             [
                 (123, "Joao Silva", "joao.silva@example.com", "enterprise", "active", "whatsapp"),
-                (124, "Ana Costa", "ana.costa@example.com", "mid-market", "active", "chat"),
+                (124, "Ana Costa", "ana.costa@example.com", "mid-market", "active", "email"),
                 (125, "Marcos Lima", "marcos.lima@example.com", "startup", "at_risk", "voice"),
+                (126, "Carol Souza", "carol.souza@example.com", "enterprise", "active", "voice"),
+                (127, "Bruno Rocha", "bruno.rocha@example.com", "mid-market", "active", "chat"),
             ],
         )
         conn.executemany(
@@ -73,6 +86,39 @@ def initialize_database(db_path: Path = DB_PATH) -> None:
                 (9002, 123, "2026-04-27", 780.50, "paid"),
                 (9003, 124, "2026-05-02", 245.00, "pending"),
                 (9004, 125, "2026-05-04", 99.90, "failed"),
+                (9005, 126, "2026-05-05", 1320.00, "paid"),
+                (9006, 126, "2026-05-07", 210.75, "paid"),
+                (9007, 127, "2026-05-08", 540.20, "paid"),
+            ],
+        )
+        conn.executemany(
+            """
+            INSERT INTO customer_channel_events
+                (event_id, customer_id, channel, event_timestamp, event_type, notes)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            [
+                (1, 123, "chat", "2026-05-01 09:05:00", "support_message", "Asked about invoice status"),
+                (2, 123, "whatsapp", "2026-05-01 11:20:00", "follow_up", "Confirmed payment date"),
+                (3, 123, "email", "2026-05-02 15:45:00", "document_sent", "Sent invoice copy"),
+                (4, 123, "whatsapp", "2026-05-03 10:10:00", "support_message", "Asked for receipt"),
+                (5, 124, "email", "2026-05-01 08:30:00", "campaign_open", "Opened onboarding email"),
+                (6, 124, "chat", "2026-05-01 14:15:00", "support_message", "Asked about setup"),
+                (7, 124, "voice", "2026-05-02 09:00:00", "callback", "Talked with support"),
+                (8, 124, "email", "2026-05-04 17:25:00", "follow_up", "Received setup checklist"),
+                (9, 125, "whatsapp", "2026-05-02 12:40:00", "support_message", "Reported failed payment"),
+                (10, 125, "voice", "2026-05-02 16:05:00", "callback", "Payment issue investigated"),
+                (11, 125, "chat", "2026-05-03 09:50:00", "support_message", "Asked for retry link"),
+                (12, 125, "voice", "2026-05-05 13:30:00", "escalation", "Escalated payment failure"),
+                (13, 126, "chat", "2026-05-01 09:10:00", "support_message", "Asked about enterprise plan"),
+                (14, 126, "whatsapp", "2026-05-01 10:35:00", "follow_up", "Requested proposal details"),
+                (15, 126, "email", "2026-05-02 18:00:00", "document_sent", "Received proposal"),
+                (16, 126, "chat", "2026-05-03 11:45:00", "support_message", "Asked about SLA"),
+                (17, 126, "voice", "2026-05-03 16:20:00", "callback", "Negotiated contract"),
+                (18, 127, "chat", "2026-05-04 10:00:00", "support_message", "Asked about trial"),
+                (19, 127, "email", "2026-05-04 12:10:00", "campaign_open", "Opened trial guide"),
+                (20, 127, "whatsapp", "2026-05-05 15:55:00", "follow_up", "Requested activation help"),
+                (21, 127, "chat", "2026-05-06 09:35:00", "support_message", "Confirmed account activation"),
             ],
         )
 
@@ -88,7 +134,7 @@ def ensure_database(db_path: Path = DB_PATH) -> None:
         initialize_database(db_path)
         return
 
-    if not {"customers", "orders"}.issubset(existing_tables):
+    if not {"customers", "orders", "customer_channel_events"}.issubset(existing_tables):
         initialize_database(db_path)
 
 
@@ -133,6 +179,15 @@ def database_schema(db_path: Path = DB_PATH) -> str:
             for column in columns
         )
         sections.append(f"- {table}: {column_text}")
+    sections.append(
+        "\nBusiness meaning:\n"
+        "- customers.current_channel is the latest known channel snapshot.\n"
+        "- customer_channel_events stores the chronological channel journey.\n"
+        "- Use event_timestamp to sort customer interactions by time.\n"
+        "- Use MAX(event_timestamp) or ORDER BY event_timestamp DESC LIMIT 1 "
+        "to find the latest interaction.\n"
+        "- Use COUNT, GROUP BY, MIN, MAX, and ORDER BY for analytical questions."
+    )
     return "\n".join(sections)
 
 

@@ -11,7 +11,8 @@ mcp = FastMCP(
     "week9-sqlite-mcp",
     instructions=(
         "Local learning MCP server exposing read-only SQLite context and tools. "
-        "Use fixed tools when possible; use query_readonly only for SELECT-style analysis."
+        "Use fixed tools for direct lookups and query_readonly for SELECT analysis "
+        "with counts, groups, dates, ordering, min/max, and customer journey history."
     ),
 )
 
@@ -45,7 +46,12 @@ def get_customer_by_id(customer_id: int) -> dict[str, Any] | str:
 
 @mcp.tool()
 def query_readonly(sql: str, limit: int = 20) -> list[dict[str, Any]]:
-    """Run one SELECT-only query against SQLite with a hard result limit."""
+    """Run one safe SELECT query for analytics.
+
+    Use this for counts, grouping, ordering, min/max dates, customer
+    channel history, and simple joins between customers, orders, and
+    customer_channel_events.
+    """
     return db.query_readonly(sql, limit=limit)
 
 
