@@ -38,6 +38,8 @@ Rules:
 - Use customers.current_channel only for the latest known channel snapshot.
 - Never generate write SQL. No INSERT, UPDATE, DELETE, DROP, ALTER, CREATE, PRAGMA, ATTACH, or VACUUM.
 - If the question cannot be answered from the local database, choose "none".
+- Return the "reason" field to explain your tool choice in simple language.
+- Return the "sql" argument for query_readonly decisions/tool
 
 Examples:
 - How many customers are in WhatsApp?
@@ -228,6 +230,16 @@ def _content_to_text(result: Any) -> str:
             parts.append(str(item))
     return "\n".join(parts)
 
+def _resource_to_text(result: Any) -> str:
+    parts: list[str] = []
+    for item in getattr(result, "contents", []):
+        text = getattr(item, "text", None)
+        if text is not None:
+            parts.append(text)
+        else:
+            parts.append(str(item))
+    return "\n".join(parts)
+
 
 def _format_query_result(tool_text: str) -> str:
     stripped = tool_text.strip()
@@ -258,12 +270,23 @@ def _format_query_result(tool_text: str) -> str:
     return "\n".join(formatted_rows)
 
 
-async def choose_tool(question: str) -> dict[str, Any]:
+async def choose_tool(question: str, schema_context: str, sql_playbook: str) -> dict[str, Any]:
     deterministic_decision = _route_simple_question(question)
     if deterministic_decision is not None:
         return deterministic_decision
 
-    prompt = f"{SYSTEM_PROMPT}\n\nAvailable schema:\n{db.database_schema()}\n\nUser question: {question}"
+    prompt = f"""
+        {SYSTEM_PROMPT}
+
+        Available schema:
+        {schema_context}
+
+        SQL playbook:
+        {sql_playbook}
+
+        User question:
+        {question}
+        """
     raw = await ollama_generate(prompt)
     decision = _extract_json(raw)
     return _normalize_decision(decision)
@@ -277,6 +300,7 @@ If the result contains customer fields or numeric values, use them directly.
 If the tool result contains multiple rows, preserve the exact row order.
 Do not sort, regroup, or reinterpret rows after the SQL result is returned.
 When dates or timestamps are present, print them exactly as provided.
+Briefly explain which tool result supports the answer, without inventing extra reasoning.
 Only say the local database does not contain enough information when the tool result is empty or explicitly says no data was found.
 
 User question:
@@ -305,7 +329,13 @@ async def run_agent(question: str) -> str:
             tools = await session.list_tools()
             tool_names = {tool.name for tool in tools.tools}
 
-            decision = await choose_tool(question)
+            schema_resource = await session.read_resource("sqlite://schema")
+            playbook_resource = await session.read_resource("docs://sql-playbook")
+
+            schema_context = _resource_to_text(schema_resource)
+            sql_playbook = _resource_to_text(playbook_resource)
+
+            decision = await choose_tool(question, schema_context, sql_playbook)
             tool_name = decision.get("tool", "none")
             if tool_name == "none":
                 return "I do not have enough local SQLite data to answer that question."
@@ -314,10 +344,29 @@ async def run_agent(question: str) -> str:
 
             result = await session.call_tool(tool_name, arguments=decision.get("arguments", {}))
             tool_text = _content_to_text(result)
+
+            # DEBUG
+            debug_lines = [
+                "Tool decision:",
+                f"- tool: {tool_name}",
+                f"- reason: {decision.get('reason', 'No reason provided.')}",
+            ]
+            sql = decision.get("arguments", {}).get("sql")
+            if sql:
+                debug_lines.extend([
+                    "- sql:",
+                    sql,
+                ])
+
+            debug_lines.append("")
+            debug_lines.append("Tool result:")
+
             if tool_name == "query_readonly":
-                return _format_query_result(tool_text)
-            final_answer = await answer_from_tool(question, tool_name, tool_text)
-            return final_answer
+                final_result = _format_query_result(tool_text)
+            else:
+                final_result = await answer_from_tool(question, tool_name, tool_text)
+
+            return "\n".join(debug_lines + [final_result])
 
 
 def parse_args() -> argparse.Namespace:

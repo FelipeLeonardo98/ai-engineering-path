@@ -22,6 +22,10 @@ def sqlite_schema() -> str:
     """Return the read-only SQLite schema exposed to the AI client."""
     return db.database_schema()
 
+@mcp.resource("docs://sql-playbook")
+def sql_playbook() -> str:
+    """Return the SQL playbook content for the AI client."""
+    return (db.PROJECT_ROOT / "docs" / "sql_playbook.md").read_text(encoding="utf-8")
 
 @mcp.tool()
 def list_tables() -> list[str]:
